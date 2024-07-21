@@ -1,6 +1,6 @@
 from pathlib import Path
 from typing import Literal, Optional, Union
-
+import logging
 from colbert.infra import ColBERTConfig
 
 from ragatouille.data import TrainingDataProcessor
@@ -99,84 +99,92 @@ class RAGTrainer:
         Returns:
             data_out_path: Union[str, Path] - Path to the directory where the data has been exported.
         """
-        if all_documents is not None:
-            self.collection += [doc for doc in all_documents if isinstance(doc, str)]
+        try:
+            if all_documents is not None:
+                self.collection += [doc for doc in all_documents if isinstance(doc, str)]
 
-        self.data_dir = Path(data_out_path)
-        sample = raw_data[0]
-        if len(sample) == 2:
-            data_type = "pairs"
-        elif len(sample) == 3:
-            if pairs_with_labels:
-                data_type = "labeled_pairs"
-                if sample[-1] not in [positive_label, negative_label]:
-                    raise ValueError(f"Invalid value for label: {sample}")
+            self.data_dir = Path(data_out_path)
+            sample = raw_data[0]
+            if len(sample) == 2:
+                data_type = "pairs"
+            elif len(sample) == 3:
+                if pairs_with_labels:
+                    data_type = "labeled_pairs"
+                    if sample[-1] not in [positive_label, negative_label]:
+                        raise ValueError(f"Invalid value for label: {sample}")
+                else:
+                    data_type = "triplets"
             else:
-                data_type = "triplets"
-        else:
-            raise ValueError("Raw data must be a list of pairs or triplets of strings.")
+                raise ValueError("Raw data must be a list of pairs or triplets of strings.")
 
-        self.queries = set()
-        for x in raw_data:
-            if isinstance(x[0], str):
-                self.queries.add(x[0])
-            else:
-                raise ValueError("Queries must be a strings.")
+            self.queries = set()
+            for x in raw_data:
+                if isinstance(x[0], str):
+                    self.queries.add(x[0])
+                else:
+                    raise ValueError("Queries must be strings.")
 
-            self._add_to_collection(x[1])
+                self._add_to_collection(x[1])
 
-            if data_type == "triplets":
-                self._add_to_collection(x[2])
+                if data_type == "triplets":
+                    self._add_to_collection(x[2])
 
-        self.collection = list(set(self.collection))
-        seeded_shuffle(self.collection)
+            self.collection = list(set(self.collection))
+            seeded_shuffle(self.collection)
 
-        if mine_hard_negatives:
-            self.negative_miner = SimpleMiner(
-                language_code=self.language_code,
-                model_size=hard_negative_model_size,
-            )
-            self.negative_miner.build_index(self.collection)
-
-        self.data_processor = TrainingDataProcessor(
-            collection=self.collection,
-            queries=self.queries,
-            negative_miner=self.negative_miner if mine_hard_negatives else None,
-        )
-
-        self.data_processor.process_raw_data(
-            data_type=data_type,
-            raw_data=raw_data,
-            export=True,
-            data_dir=data_out_path,
-            num_new_negatives=num_new_negatives,
-            positive_label=positive_label,
-            negative_label=negative_label,
-            mine_hard_negatives=mine_hard_negatives,
-            hard_negative_minimum_rank=hard_negative_minimum_rank,
-        )
-        if len(self.data_processor.training_triplets) == 0:
             if mine_hard_negatives:
-                print(
-                    "Warning: No training triplets were generated with setting mine_hard_negatives=='True'. This may be due to the data being too small or the hard negative miner not being able to find enough hard negatives."
+                self.negative_miner = SimpleMiner(
+                    language_code=self.language_code,
+                    model_size=hard_negative_model_size,
                 )
-                self.data_processor.process_raw_data(
-                    data_type=data_type,
-                    raw_data=raw_data,
-                    export=True,
-                    data_dir=data_out_path,
-                    num_new_negatives=num_new_negatives,
-                    positive_label=positive_label,
-                    negative_label=negative_label,
-                    mine_hard_negatives=False,
-                    hard_negative_minimum_rank=hard_negative_minimum_rank,
-                )
-            else:
-                raise ValueError("No training triplets were generated.")
+                logging.info("Building index for hard negatives...")
+                # Reduce the number of CPU workers
+                self.negative_miner.build_index(self.collection, num_workers=2)
 
-        self.training_triplets = self.data_processor.training_triplets
+            self.data_processor = TrainingDataProcessor(
+                collection=self.collection,
+                queries=self.queries,
+                negative_miner=self.negative_miner if mine_hard_negatives else None,
+            )
 
-        return data_out_path
+            logging.info("Processing raw data...")
+            self.data_processor.process_raw_data(
+                data_type=data_type,
+                raw_data=raw_data,
+                export=True,
+                data_dir=data_out_path,
+                num_new_negatives=num_new_negatives,
+                positive_label=positive_label,
+                negative_label=negative_label,
+                mine_hard_negatives=mine_hard_negatives,
+                hard_negative_minimum_rank=hard_negative_minimum_rank,
+            )
+            if len(self.data_processor.training_triplets) == 0:
+                if mine_hard_negatives:
+                    logging.warning(
+                        "No training triplets were generated with setting mine_hard_negatives=='True'. Trying again with mine_hard_negatives=False."
+                    )
+                    self.data_processor.process_raw_data(
+                        data_type=data_type,
+                        raw_data=raw_data,
+                        export=True,
+                        data_dir=data_out_path,
+                        num_new_negatives=num_new_negatives,
+                        positive_label=positive_label,
+                        negative_label=negative_label,
+                        mine_hard_negatives=False,
+                        hard_negative_minimum_rank=hard_negative_minimum_rank,
+                    )
+                else:
+                    raise ValueError("No training triplets were generated.")
+
+            self.training_triplets = self.data_processor.training_triplets
+
+            return data_out_path
+
+        except Exception as e:
+            logging.error(f"Error preparing training data: {e}")
+            raise
 
     def train(
         self,

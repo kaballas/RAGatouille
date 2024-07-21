@@ -52,7 +52,7 @@ class SimpleMiner(HardNegativeMiner):
         self,
         collection,
         batch_size: int = 128,
-        save_index: bool = False,
+        save_index: bool = True,
         save_path: Union[str, Path] = None,
         force_fp32: bool = True,
     ):
